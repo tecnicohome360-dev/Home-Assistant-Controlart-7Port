@@ -1,0 +1,419 @@
+"""Banco de dados de dispositivos da integração ControlArt 7Port.
+
+O banco combina duas fontes:
+
+1. Definições embutidas no repositório (`devices/**/*.yaml`) — atualizadas
+   junto com a integração via HACS.
+2. Definições criadas pelo usuário dentro do Home Assistant — persistidas
+   em `.storage` e preservadas entre atualizações da integração.
+
+Cada definição descreve um modelo de aparelho (marca/modelo) e os códigos
+IR necessários para controlá-lo.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
+from homeassistant.util import slugify
+
+from .const import (
+    CMD_LIGHT_OFF,
+    CMD_POWER_OFF,
+    CMD_POWER_ON,
+    CMD_SWING_OFF,
+    CMD_SWING_ON,
+    DB_FAN_MODES,
+    DB_HVAC_MODES,
+    DEVICE_TYPE_CLIMATE,
+    DOMAIN,
+    POWER_BEHAVIORS,
+    POWER_STATEFUL,
+    STORAGE_KEY,
+    STORAGE_VERSION,
+    SWING_NONE,
+    SWING_SEPARATE,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+_DEVICES_DIR = Path(__file__).parent / "devices"
+
+
+class DeviceDefinition:
+    """Definição imutável de um modelo de aparelho."""
+
+    def __init__(self, data: dict[str, Any], builtin: bool) -> None:
+        """Cria a definição a partir do dicionário YAML/JSON."""
+        self.raw = data
+        self.builtin = builtin
+        self.id: str = data["id"]
+        self.brand: str = data.get("brand", "Desconhecida")
+        self.model: str = data.get("model", "Genérico")
+        self.device_type: str = data.get("device_type", DEVICE_TYPE_CLIMATE)
+        self.power_behavior: str = data.get("power_behavior", POWER_STATEFUL)
+        self.min_temp: int = int(data.get("min_temp", 16))
+        self.max_temp: int = int(data.get("max_temp", 30))
+        self.temp_step: int = int(data.get("temp_step", 1))
+        self.hvac_modes: list[str] = list(data.get("hvac_modes", ["cool"]))
+        self.fan_modes: list[str] = list(data.get("fan_modes", DB_FAN_MODES))
+        self.swing_mode: str = data.get("swing_mode", SWING_NONE)
+        self.commands: dict[str, Any] = data.get("commands", {})
+        # states[modo][fan][temp] -> código IR
+        self.states: dict[str, dict[str, dict[int, str]]] = {}
+        for mode, fans in (data.get("states") or {}).items():
+            self.states[mode] = {}
+            for fan, temps in (fans or {}).items():
+                self.states[mode][fan] = {
+                    int(t): code for t, code in (temps or {}).items()
+                }
+
+    @property
+    def label(self) -> str:
+        """Rótulo amigável para exibição em listas."""
+        return f"{self.brand} — {self.model}"
+
+    @property
+    def has_power_on(self) -> bool:
+        """Indica se há um código de 'ligar' separado."""
+        return bool(self.commands.get(CMD_POWER_ON))
+
+    @property
+    def has_light_off(self) -> bool:
+        """Indica se há um código de 'apagar luz' do aparelho."""
+        return bool(self.commands.get(CMD_LIGHT_OFF))
+
+    @property
+    def has_swing(self) -> bool:
+        """Indica se o aparelho oferece controle de swing."""
+        return self.swing_mode != SWING_NONE
+
+    def state_code(self, mode: str, fan: str, temp: int) -> str | None:
+        """Retorna o código IR para um estado (modo/fan/temperatura)."""
+        return self.states.get(mode, {}).get(fan, {}).get(int(temp))
+
+    def command(self, key: str) -> str | None:
+        """Retorna um código de comando especial (power_off, etc.)."""
+        return self.commands.get(key)
+
+
+class DeviceDatabase:
+    """Agrega definições embutidas e definições do usuário."""
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Inicializa o banco de dados."""
+        self._hass = hass
+        self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._builtin: dict[str, DeviceDefinition] = {}
+        self._custom: dict[str, DeviceDefinition] = {}
+
+    async def async_load(self) -> None:
+        """Carrega definições embutidas (YAML) e do usuário (storage)."""
+        builtin = await self._hass.async_add_executor_job(_load_builtin)
+        self._builtin = {d.id: d for d in builtin}
+
+        stored = await self._store.async_load() or {}
+        self._custom = {}
+        for dev in stored.get("devices", {}).values():
+            try:
+                definition = DeviceDefinition(dev, builtin=False)
+                self._custom[definition.id] = definition
+            except (KeyError, ValueError, TypeError) as err:
+                _LOGGER.warning("Definição de dispositivo inválida ignorada: %s", err)
+
+        _LOGGER.debug(
+            "Banco de dispositivos carregado: %s embutidos, %s do usuário",
+            len(self._builtin),
+            len(self._custom),
+        )
+
+    @property
+    def _all(self) -> dict[str, DeviceDefinition]:
+        """Todas as definições (usuário sobrepõe embutidas com mesmo id)."""
+        return {**self._builtin, **self._custom}
+
+    def get(self, device_id: str) -> DeviceDefinition | None:
+        """Retorna uma definição pelo id."""
+        return self._all.get(device_id)
+
+    def brands(self, device_type: str) -> list[str]:
+        """Lista marcas que possuem ao menos um modelo do tipo informado."""
+        brands = {
+            d.brand
+            for d in self._all.values()
+            if d.device_type == device_type
+        }
+        return sorted(brands)
+
+    def models(self, device_type: str, brand: str) -> list[DeviceDefinition]:
+        """Lista definições de uma marca para um tipo de dispositivo."""
+        return sorted(
+            (
+                d
+                for d in self._all.values()
+                if d.device_type == device_type and d.brand == brand
+            ),
+            key=lambda d: d.model,
+        )
+
+    async def async_add_custom(self, definition: dict[str, Any]) -> DeviceDefinition:
+        """Persiste uma nova definição criada pelo usuário."""
+        device = DeviceDefinition(definition, builtin=False)
+        self._custom[device.id] = device
+        await self._async_save()
+        return device
+
+    async def async_remove_custom(self, device_id: str) -> None:
+        """Remove uma definição criada pelo usuário."""
+        if device_id in self._custom:
+            del self._custom[device_id]
+            await self._async_save()
+
+    async def _async_save(self) -> None:
+        """Grava as definições do usuário em `.storage`."""
+        await self._store.async_save(
+            {"devices": {d.id: d.raw for d in self._custom.values()}}
+        )
+
+    def unique_id(self, base: str) -> str:
+        """Gera um id único a partir de um texto base (marca+modelo)."""
+        root = slugify(base) or "dispositivo"
+        candidate = root
+        i = 2
+        while candidate in self._all:
+            candidate = f"{root}_{i}"
+            i += 1
+        return candidate
+
+
+def _load_builtin() -> list[DeviceDefinition]:
+    """Carrega todos os arquivos YAML embutidos (executado em executor)."""
+    devices: list[DeviceDefinition] = []
+    if not _DEVICES_DIR.exists():
+        return devices
+    for path in sorted(_DEVICES_DIR.rglob("*.yaml")):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle)
+            if not isinstance(data, dict) or "id" not in data:
+                _LOGGER.warning("Arquivo de dispositivo inválido: %s", path)
+                continue
+            devices.append(DeviceDefinition(data, builtin=True))
+        except (yaml.YAMLError, OSError, KeyError, ValueError) as err:
+            _LOGGER.error("Erro ao carregar %s: %s", path, err)
+    return devices
+
+
+async def async_get_database(hass: HomeAssistant) -> DeviceDatabase:
+    """Retorna a instância compartilhada do banco de dados (carrega 1x)."""
+    store = hass.data.setdefault(DOMAIN, {})
+    db: DeviceDatabase | None = store.get("database")
+    if db is None:
+        db = DeviceDatabase(hass)
+        await db.async_load()
+        store["database"] = db
+    return db
+
+
+# ---------------------------------------------------------------------------
+# Conversão de códigos colados pelo usuário (assistente "Criar dispositivo")
+# ---------------------------------------------------------------------------
+
+_RE_SENDIR_PREFIX = re.compile(r"^sendir,\d+:\d+(.*)$", re.IGNORECASE)
+_RE_TEMP = re.compile(
+    r"^(?:temp[-_ ]?)?(auto|low|medium|high)[-_ ]?(\d+)$", re.IGNORECASE
+)
+
+
+def normalize_code(raw: str) -> str | None:
+    """Normaliza um código colado para o formato armazenado no banco.
+
+    Aceita o código completo (`sendir,1:8,1,38000,...`), com aspas, ou já
+    "limpo" (`,1,38000,...`). Retorna o trecho após `sendir,1:<porta>`.
+    """
+    if raw is None:
+        return None
+    code = str(raw).strip().strip('"').strip("'").strip()
+    if not code:
+        return None
+    match = _RE_SENDIR_PREFIX.match(code)
+    if match:
+        code = match.group(1)
+    if not code.startswith(","):
+        code = "," + code
+    return code
+
+
+class CodeParseResult:
+    """Resultado da análise de um bloco de códigos colados."""
+
+    def __init__(self) -> None:
+        """Inicializa o resultado vazio."""
+        self.commands: dict[str, str] = {}
+        self.states: dict[str, dict[int, str]] = {}  # states[fan][temp]
+        self.errors: list[str] = []
+        self.unknown: list[str] = []
+
+    @property
+    def state_count(self) -> int:
+        """Quantidade de códigos de estado reconhecidos."""
+        return sum(len(temps) for temps in self.states.values())
+
+
+def parse_code_block(text: str) -> CodeParseResult:
+    """Analisa um bloco de texto com linhas `nome: código`.
+
+    Reconhece os nomes usados nas planilhas do integrador:
+    `ligar_ar`, `desligar_ar`, `luz_do_ar`, `swing_on`, `swing_off`,
+    e estados no formato `Temp-<fan><temperatura>` (ex.: `Temp-auto22`).
+    """
+    result = CodeParseResult()
+    alias = {
+        "ligar_ar": CMD_POWER_ON,
+        "ligar": CMD_POWER_ON,
+        "power_on": CMD_POWER_ON,
+        "on": CMD_POWER_ON,
+        "desligar_ar": CMD_POWER_OFF,
+        "desligar": CMD_POWER_OFF,
+        "power_off": CMD_POWER_OFF,
+        "off": CMD_POWER_OFF,
+        "luz_do_ar": CMD_LIGHT_OFF,
+        "luz": CMD_LIGHT_OFF,
+        "light_off": CMD_LIGHT_OFF,
+        "swing_on": CMD_SWING_ON,
+        "oscilar_on": CMD_SWING_ON,
+        "swing_off": CMD_SWING_OFF,
+        "oscilar_off": CMD_SWING_OFF,
+    }
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            result.errors.append(f"Linha {lineno}: faltou ':' — '{line[:40]}'")
+            continue
+        name, _, value = line.partition(":")
+        name = name.strip()
+        code = normalize_code(value)
+        if not code:
+            result.errors.append(f"Linha {lineno}: código vazio para '{name}'")
+            continue
+
+        key = name.lower()
+        if key in alias:
+            result.commands[alias[key]] = code
+            continue
+
+        match = _RE_TEMP.match(name)
+        if match:
+            fan = match.group(1).lower()
+            temp = int(match.group(2))
+            result.states.setdefault(fan, {})[temp] = code
+            continue
+
+        result.unknown.append(name)
+
+    return result
+
+
+def build_climate_definition(
+    *,
+    device_id: str,
+    brand: str,
+    model: str,
+    power_behavior: str,
+    min_temp: int,
+    max_temp: int,
+    fan_modes: list[str],
+    swing_mode: str,
+    parsed: CodeParseResult,
+) -> dict[str, Any]:
+    """Monta o dicionário de definição de um aparelho de climatização."""
+    if power_behavior not in POWER_BEHAVIORS:
+        power_behavior = POWER_STATEFUL
+
+    commands = {
+        CMD_POWER_OFF: parsed.commands.get(CMD_POWER_OFF),
+        CMD_POWER_ON: parsed.commands.get(CMD_POWER_ON),
+        CMD_LIGHT_OFF: parsed.commands.get(CMD_LIGHT_OFF),
+    }
+    if swing_mode == SWING_SEPARATE:
+        commands[CMD_SWING_ON] = parsed.commands.get(CMD_SWING_ON)
+        commands[CMD_SWING_OFF] = parsed.commands.get(CMD_SWING_OFF)
+
+    states: dict[str, Any] = {"cool": {}}
+    for fan in fan_modes:
+        temps = parsed.states.get(fan, {})
+        if temps:
+            states["cool"][fan] = {
+                t: c for t, c in sorted(temps.items())
+                if min_temp <= t <= max_temp
+            }
+
+    return {
+        "id": device_id,
+        "brand": brand,
+        "model": model,
+        "device_type": DEVICE_TYPE_CLIMATE,
+        "power_behavior": power_behavior,
+        "min_temp": int(min_temp),
+        "max_temp": int(max_temp),
+        "temp_step": 1,
+        "hvac_modes": ["cool"],
+        "fan_modes": [f for f in fan_modes if f in states["cool"]],
+        "swing_mode": swing_mode,
+        "commands": commands,
+        "states": states,
+    }
+
+
+def definition_to_yaml(definition: dict[str, Any]) -> str:
+    """Serializa uma definição em YAML (para o usuário contribuir no repo)."""
+
+    class _Dumper(yaml.SafeDumper):
+        pass
+
+    _Dumper.add_representer(
+        type(None),
+        lambda d, _: d.represent_scalar("tag:yaml.org,2002:null", "~"),
+    )
+    return yaml.dump(
+        definition,
+        Dumper=_Dumper,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        width=10**9,
+    )
+
+
+def expected_state_keys(fan_modes: list[str], min_temp: int, max_temp: int) -> list[str]:
+    """Lista os nomes de comando esperados para uma matriz fan × temperatura."""
+    keys: list[str] = []
+    for fan in fan_modes:
+        for temp in range(min_temp, max_temp + 1):
+            keys.append(f"Temp-{fan}{temp}")
+    return keys
+
+
+__all__ = [
+    "DB_FAN_MODES",
+    "DB_HVAC_MODES",
+    "CodeParseResult",
+    "DeviceDatabase",
+    "DeviceDefinition",
+    "async_get_database",
+    "build_climate_definition",
+    "definition_to_yaml",
+    "expected_state_keys",
+    "normalize_code",
+    "parse_code_block",
+]

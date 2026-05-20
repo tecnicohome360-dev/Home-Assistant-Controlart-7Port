@@ -1,0 +1,72 @@
+"""Constantes da integração ControlArt 7Port."""
+
+from __future__ import annotations
+
+DOMAIN = "controlart_7port"
+
+# --- Configuração do hub (config entry) ---
+CONF_HOST = "host"
+CONF_PORT = "port"
+CONF_NAME = "name"
+
+DEFAULT_PORT = 4998
+DEFAULT_TCP_TIMEOUT = 5.0
+
+# Terminador de comando recomendado no manual da 7Port.
+COMMAND_TERMINATOR = "\r\n"
+
+# Porta lógica do emissor interno "Blaster" da 7Port.
+BLASTER_PORT = 8
+MIN_IR_PORT = 1
+MAX_IR_PORT = 8
+
+# --- Subentry (dispositivo) ---
+SUBENTRY_TYPE_DEVICE = "device"
+
+CONF_DEVICE_TYPE = "device_type"
+CONF_DEVICE_ID = "device_id"
+CONF_BRAND = "brand"
+CONF_MODEL = "model"
+CONF_IR_PORT = "ir_port"
+CONF_POWER_BEHAVIOR = "power_behavior"
+CONF_ON_DELAY = "on_delay"
+CONF_ENABLED_HVAC_MODES = "enabled_hvac_modes"
+CONF_ENABLE_SWING = "enable_swing"
+CONF_ENABLE_LIGHT_OFF = "enable_light_off"
+CONF_POWER_SENSOR = "power_sensor"
+CONF_POWER_THRESHOLD = "power_threshold"
+
+DEFAULT_ON_DELAY = 0.8
+DEFAULT_POWER_THRESHOLD = 0.1
+
+# Tipos de dispositivo suportados.
+DEVICE_TYPE_CLIMATE = "climate"
+SUPPORTED_DEVICE_TYPES = [DEVICE_TYPE_CLIMATE]
+
+# Comportamentos de ligar.
+POWER_STATEFUL = "stateful"      # o código de estado já liga o aparelho
+POWER_EXPLICIT_ON = "explicit_on"  # precisa enviar "ligar" antes do estado
+POWER_BEHAVIORS = [POWER_STATEFUL, POWER_EXPLICIT_ON]
+
+# Modos de swing suportados pelo banco de dados.
+SWING_NONE = "none"
+SWING_SEPARATE = "separate"  # comandos swing_on / swing_off independentes
+SWING_MODES_DB = [SWING_NONE, SWING_SEPARATE]
+
+# Chaves de comando padrão.
+CMD_POWER_OFF = "power_off"
+CMD_POWER_ON = "power_on"
+CMD_LIGHT_OFF = "light_off"
+CMD_SWING_ON = "swing_on"
+CMD_SWING_OFF = "swing_off"
+
+# Modos HVAC reconhecidos no banco de dados.
+DB_HVAC_MODES = ["cool", "heat", "dry", "fan_only"]
+DB_FAN_MODES = ["auto", "low", "medium", "high"]
+
+# Armazenamento de definições de dispositivo criadas pelo usuário.
+STORAGE_KEY = f"{DOMAIN}_devices"
+STORAGE_VERSION = 1
+
+# Sentinela usada no fluxo de configuração para "criar nova definição".
+NEW_DEFINITION = "__new__"

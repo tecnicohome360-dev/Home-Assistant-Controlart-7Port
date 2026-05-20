@@ -1,0 +1,148 @@
+{
+  "title": "ControlArt 7Port",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a 7Port",
+        "description": "Enter the connection details of your ControlArt 7Port.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "TCP port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not open a TCP connection to the 7Port. Check the IP address and port."
+    },
+    "abort": {
+      "already_configured": "This 7Port is already configured."
+    }
+  },
+  "config_subentries": {
+    "device": {
+      "title": "Device",
+      "initiate_flow": {
+        "user": "Add device",
+        "reconfigure": "Edit device"
+      },
+      "step": {
+        "user": {
+          "title": "Device type",
+          "description": "Choose the type of device to control through this 7Port.",
+          "data": {
+            "device_type": "Type"
+          }
+        },
+        "brand": {
+          "title": "Brand",
+          "description": "Pick the brand of the appliance, or create a new device definition.",
+          "data": {
+            "brand": "Brand"
+          }
+        },
+        "model": {
+          "title": "Model",
+          "description": "Pick a {brand} model, or create a new one.",
+          "data": {
+            "model": "Model"
+          }
+        },
+        "new_meta": {
+          "title": "New device definition",
+          "description": "Describe the appliance. The codes will be collected in the next step.",
+          "data": {
+            "brand": "Brand",
+            "model": "Model",
+            "power_behavior": "Power behavior",
+            "min_temp": "Minimum temperature (°C)",
+            "max_temp": "Maximum temperature (°C)",
+            "fan_modes": "Fan speeds",
+            "swing_mode": "Swing"
+          }
+        },
+        "new_codes": {
+          "title": "Paste the captured codes",
+          "description": "Paste one code per line in the format `name: code`, exactly like the 7Config command list.\n\nExpected {count} commands: {expected}\n\nExample:\n{example}",
+          "data": {
+            "codes": "Codes"
+          }
+        },
+        "configure": {
+          "title": "Configure device",
+          "description": "Set up {device}.\n{note}",
+          "data": {
+            "name": "Name",
+            "ir_port": "7Port output (1-7, or 8 = internal Blaster)",
+            "power_behavior": "Power behavior",
+            "on_delay": "Delay after the 'power on' code",
+            "enabled_hvac_modes": "Enabled HVAC modes",
+            "enable_light_off": "Turn off the appliance display light after commands",
+            "enable_swing": "Enable swing control",
+            "power_sensor": "Power feedback sensor (optional)",
+            "power_threshold": "Sensor 'on' threshold (for numeric sensors)"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit device",
+          "description": "Edit {device}.",
+          "data": {
+            "name": "Name",
+            "ir_port": "7Port output (1-7, or 8 = internal Blaster)",
+            "power_behavior": "Power behavior",
+            "on_delay": "Delay after the 'power on' code",
+            "enabled_hvac_modes": "Enabled HVAC modes",
+            "enable_light_off": "Turn off the appliance display light after commands",
+            "enable_swing": "Enable swing control",
+            "power_sensor": "Power feedback sensor (optional)",
+            "power_threshold": "Sensor 'on' threshold (for numeric sensors)"
+          }
+        }
+      },
+      "error": {
+        "temp_range": "Minimum temperature cannot be greater than the maximum.",
+        "no_fan_modes": "Select at least one fan speed.",
+        "parse_errors": "Some lines could not be read. Check the format `name: code`.",
+        "no_states": "No state codes were recognized. Use names like `Temp-auto22`."
+      },
+      "abort": {
+        "unknown_device": "The device definition could not be found."
+      }
+    }
+  },
+  "selector": {
+    "device_type": {
+      "options": {
+        "climate": "Air conditioner"
+      }
+    },
+    "power_behavior": {
+      "options": {
+        "stateful": "The state code already turns the unit on",
+        "explicit_on": "Send a 'power on' code before the state"
+      }
+    },
+    "swing_mode": {
+      "options": {
+        "none": "No swing control",
+        "separate": "Separate on/off swing commands"
+      }
+    },
+    "fan_modes": {
+      "options": {
+        "auto": "Auto",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High"
+      }
+    },
+    "hvac_modes": {
+      "options": {
+        "cool": "Cool",
+        "heat": "Heat",
+        "dry": "Dry",
+        "fan_only": "Fan only"
+      }
+    }
+  }
+}
